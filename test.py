@@ -6,10 +6,14 @@ import torchvision.transforms as transforms
 from PIL import Image
 import numpy as np
 from sklearn.metrics import jaccard_score
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+from torch.utils.data import Dataset, DataLoader
+import cv2
 
 # Define U-Net model
 class UNet(nn.Module):
-    def __init__(self, in_channels=1, out_channels=1, features=[64, 128, 256, 512, 1024]):
+    def __init__(self, in_channels=1, out_channels=1, features=[64, 128, 256, 512]):
         super(UNet, self).__init__()
         self.encoder = nn.ModuleList()
         self.decoder = nn.ModuleList()
@@ -78,12 +82,28 @@ def iou_score(y_true, y_pred, threshold=0.5):
 
 
 # Training Loop
+# def train_model(model, loader, optimizer, criterion, device):
+#     model.train()
+#     epoch_loss = 0
+#     for batch_idx, (data, target) in enumerate(loader):
+#         data, target = data.to(device), target.to(device)
+#         target = (target > 0).float()  # Convert any non-zero values to 1
+#         optimizer.zero_grad()
+#         output = model(data)
+#         loss = criterion(output, target)
+#         loss.backward()
+#         optimizer.step()
+#         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+#         epoch_loss += loss.item()
+#     return epoch_loss / len(loader)
+
 def train_model(model, loader, optimizer, criterion, device):
     model.train()
     epoch_loss = 0
     for batch_idx, (data, target) in enumerate(loader):
         data, target = data.to(device), target.to(device)
-        target = (target > 0).float()  # Convert any non-zero values to 1
+        target = target.unsqueeze(1)  # Adjust target to [batch_size, 1, height, width]
+
         optimizer.zero_grad()
         output = model(data)
         loss = criterion(output, target)
@@ -91,6 +111,7 @@ def train_model(model, loader, optimizer, criterion, device):
         optimizer.step()
         epoch_loss += loss.item()
     return epoch_loss / len(loader)
+
 
 # Testing Model
 def test_model(model, loader, device):
@@ -110,22 +131,54 @@ def test_model(model, loader, device):
     return np.mean(dice_scores), np.mean(iou_scores)
 
 # Dataset Class
+# class RetinaDataset(Dataset):
+#     def __init__(self, image_paths, mask_paths, transform=None):
+#         self.image_paths = image_paths
+#         self.mask_paths = mask_paths
+#         self.transform = transform
+
+#     def __len__(self):
+#         return len(self.image_paths)
+
+#     def __getitem__(self, idx):
+#         image = Image.open(self.image_paths[idx]).convert("L")
+#         mask = Image.open(self.mask_paths[idx]).convert("L")
+#         if self.transform:
+#             image = self.transform(image)
+#             mask = self.transform(mask)
+#         return image, mask
+
+
+# Define the Dataset class with oversampling
 class RetinaDataset(Dataset):
-    def __init__(self, image_paths, mask_paths, transform=None):
+    def __init__(self, image_paths, mask_paths, transform=None, oversample_factor=2):
         self.image_paths = image_paths
         self.mask_paths = mask_paths
         self.transform = transform
+        self.oversample_factor = oversample_factor  # Number of augmented versions per image
 
     def __len__(self):
-        return len(self.image_paths)
+        return len(self.image_paths) * self.oversample_factor
 
     def __getitem__(self, idx):
-        image = Image.open(self.image_paths[idx]).convert("L")
-        mask = Image.open(self.mask_paths[idx]).convert("L")
+        # Calculate the actual image index
+        img_idx = idx % len(self.image_paths)  # Get actual image index for oversampling
+        
+        # Load image and mask
+        image = cv2.imread(self.image_paths[img_idx], cv2.IMREAD_GRAYSCALE)
+        mask = cv2.imread(self.mask_paths[img_idx], cv2.IMREAD_GRAYSCALE)
+        
+        # Convert mask to binary if necessary
+        mask = (mask > 0).astype(np.float32)
+
+        # Apply transformations if specified
         if self.transform:
-            image = self.transform(image)
-            mask = self.transform(mask)
+            augmented = self.transform(image=image, mask=mask)
+            image = augmented["image"]
+            mask = augmented["mask"]
+        
         return image, mask
+
     
 class DiceLoss(nn.Module):
     def __init__(self):
@@ -164,19 +217,42 @@ def main():
         transforms.Resize((256, 256)),
         transforms.ToTensor(),
     ])
-    train_images_path = '/Users/danielvennemeyer/Workspace/Deep Learning/HW3/Data/test/image'
+
+    # import albumentations as A
+    # from albumentations.pytorch import ToTensorV2
+
+   # Define transformations with noise, rotation, and other augmentations
+    transform = A.Compose([
+        A.Rotate(limit=45, p=0.5),
+        A.HorizontalFlip(p=0.5),
+        A.VerticalFlip(p=0.5),
+        A.GaussNoise(var_limit=(10.0, 50.0), p=0.5),
+        A.RandomBrightnessContrast(p=0.2),
+        A.Normalize(mean=0.5, std=0.5),
+        ToTensorV2()
+    ])
+
+    train_images_path = '/Users/danielvennemeyer/Workspace/Deep Learning/Retinal-Segmentation/Data/test/image'
     train_images = [os.path.join(train_images_path, f) for f in os.listdir(train_images_path)]
-    train_mask_path = '/Users/danielvennemeyer/Workspace/Deep Learning/HW3/Data/test/mask'
+    train_mask_path = '/Users/danielvennemeyer/Workspace/Deep Learning/Retinal-Segmentation/Data/test/mask'
     train_masks = [os.path.join(train_mask_path, f) for f in os.listdir(train_mask_path)]
 
     dataset = RetinaDataset(train_images, train_masks, transform=transform)
     train_loader = DataLoader(dataset, batch_size=8, shuffle=True)
     val_loader = DataLoader(dataset, batch_size=8, shuffle=False)
 
+    # Example usage
+    # train_image_paths = ["path/to/image1.png", "path/to/image2.png"]  # Replace with actual paths
+    # train_mask_paths = ["path/to/mask1.png", "path/to/mask2.png"]
+
+    # # Instantiate dataset and dataloader
+    # train_dataset = RetinaDataset(train_image_paths, train_mask_paths, transform=transform, oversample_factor=5)
+    # train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
+
     model = UNet(in_channels=1, out_channels=1).to(device)
     # optimizer = optim.Adam(model.parameters(), lr=0.001)
     from torch.optim.lr_scheduler import ReduceLROnPlateau
-    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, verbose=True)
 
     criterion = combined_loss
