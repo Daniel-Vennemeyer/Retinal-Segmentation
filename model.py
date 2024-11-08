@@ -1,252 +1,263 @@
-import torch
+import torch, os
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
-from torchvision import transforms
-from torch import device
 import numpy as np
-import os
-from sklearn.model_selection import train_test_split
-from PIL import Image
-import matplotlib.pyplot as plt
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+from torch.utils.data import Dataset, DataLoader
+import cv2
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-
-class RetinaDataset(Dataset):
-    def __init__(self, image_paths, mask_paths, mask_transform=None, image_transform=None):
-        self.image_paths = image_paths
-        self.mask_paths = mask_paths
-        self.image_transform = image_transform
-        self.mask_transform = mask_transform
-
-    def __len__(self):
-        return len(self.image_paths)
-
-    # Apply the transformations separately
-    def __getitem__(self, idx):
-        image = Image.open(self.image_paths[idx]).convert("RGB")
-        mask = Image.open(self.mask_paths[idx]).convert("L")
-
-        # Apply image transform
-        image = self.image_transform(image)
-
-        # Apply mask transform and convert to single channel if needed
-        mask = self.mask_transform(mask)
-        mask = mask.squeeze(0)  # Ensure mask has a single channel
-
-        return image, mask
-
-# Define data paths
-train_image_dir = "/Users/danielvennemeyer/Workspace/Deep Learning/HW3/Data/train/image"
-train_mask_dir = "/Users/danielvennemeyer/Workspace/Deep Learning/HW3/Data/train/mask"
-train_images = [os.path.join(train_image_dir, img) for img in os.listdir(train_image_dir)]
-train_masks= [os.path.join(train_mask_dir, mask) for mask in os.listdir(train_mask_dir)]
-
-test_image_dir = "/Users/danielvennemeyer/Workspace/Deep Learning/HW3/Data/test/image"
-test_mask_dir = "/Users/danielvennemeyer/Workspace/Deep Learning/HW3/Data/test/mask"
-val_images = [os.path.join(test_image_dir, img) for img in os.listdir(test_image_dir)]
-val_masks = [os.path.join(test_mask_dir, mask) for mask in os.listdir(test_mask_dir)]
-
-# Split dataset
-# train_images, val_images, train_masks, val_masks = train_test_split(image_paths, mask_paths, test_size=0.2, random_state=42)
-
-
-# Transformations and DataLoader
-# transform = transforms.Compose([
-#     transforms.Resize((256, 256)),
-#     transforms.ToTensor()
-# ])
-
-from torchvision import transforms
-
-# Image transformations (for 3-channel RGB images)
-image_transform = transforms.Compose([
-    transforms.Resize((256, 256)),
-    transforms.RandomHorizontalFlip(),
-    transforms.RandomRotation(10),
-    transforms.ToTensor(),
-    transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])  # Normalize for 3 channels
-])
-
-# Mask transformations (for 1-channel binary masks)
-mask_transform = transforms.Compose([
-    transforms.Resize((256, 256)),
-    transforms.RandomHorizontalFlip(),
-    transforms.RandomRotation(10),
-    transforms.ToTensor()
-])
-
-
-
-train_dataset = RetinaDataset(train_images, train_masks, image_transform=image_transform, mask_transform=mask_transform)
-val_dataset = RetinaDataset(val_images, val_masks, image_transform=image_transform, mask_transform=mask_transform)
-train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=4)
-
-
-
-
+# Define U-Net model
 class UNet(nn.Module):
-    def __init__(self, in_channels=3, out_channels=1):
+    def __init__(self, in_channels=1, out_channels=1, features=[64, 128, 256]):
         super(UNet, self).__init__()
+        self.encoder = nn.ModuleList()
+        self.decoder = nn.ModuleList()
+        
+        # Encoder (Downsampling)
+        for feature in features:
+            self.encoder.append(self.conv_block(in_channels, feature))
+            in_channels = feature
 
-        # Encoder
-        self.enc1 = self.conv_block(in_channels, 64)
-        self.enc2 = self.conv_block(64, 128)
+        # Decoder (Upsampling)
+        for feature in reversed(features):
+            self.decoder.append(nn.ConvTranspose2d(feature*2, feature, kernel_size=2, stride=2))
+            self.decoder.append(self.conv_block(feature*2, feature))
 
         # Bottleneck
-        self.bottleneck = self.conv_block(128, 256)
+        self.bottleneck = self.conv_block(features[-1], features[-1]*2)
 
-        # Decoder
-        self.dec2 = self.conv_block(256 + 128, 128)
-        self.dec1 = self.conv_block(128 + 64, out_channels)
+        # Final Convolution
+        self.final_conv = nn.Conv2d(features[0], out_channels, kernel_size=1)
 
     def conv_block(self, in_channels, out_channels):
         return nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
-            nn.ReLU()
+            nn.ReLU(inplace=True),
         )
 
     def forward(self, x):
-        # Encoder
-        enc1 = self.enc1(x)
-        enc2 = self.enc2(nn.MaxPool2d(2)(enc1))
-        
-        # Bottleneck
-        bottleneck = self.bottleneck(nn.MaxPool2d(2)(enc2))
-        
-        # Decoder
-        dec2 = self.dec2(torch.cat([nn.Upsample(scale_factor=2)(bottleneck), enc2], dim=1))
-        dec1 = self.dec1(torch.cat([nn.Upsample(scale_factor=2)(dec2), enc1], dim=1))
+        skip_connections = []
+        for down in self.encoder:
+            x = down(x)
+            skip_connections.append(x)
+            x = nn.MaxPool2d(kernel_size=2, stride=2)(x)
 
-        return torch.sigmoid(dec1)
+        x = self.bottleneck(x)
+        skip_connections = skip_connections[::-1]
 
-# Initialize model
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = UNet(in_channels=3, out_channels=1).to(device)
+        for idx in range(0, len(self.decoder), 2):
+            x = self.decoder[idx](x)
+            skip_connection = skip_connections[idx // 2]
+            if x.shape != skip_connection.shape:
+                x = nn.functional.interpolate(x, size=skip_connection.shape[2:])
+            x = torch.cat((skip_connection, x), dim=1)
+            x = self.decoder[idx+1](x)
+            
+        return self.final_conv(x)
+
+def dice_coefficient(y_true, y_pred, threshold=0.5):
+    y_pred = (y_pred > threshold).float()  # Threshold predictions
+    y_true_f = y_true.view(-1)
+    y_pred_f = y_pred.view(-1)
+    intersection = (y_true_f * y_pred_f).sum()
+    dice = (2. * intersection + 1e-6) / (y_true_f.sum() + y_pred_f.sum() + 1e-6)
+    return dice.item()
+
+def iou_score(y_true, y_pred, threshold=0.5):
+    y_pred = (y_pred > threshold).float()  # Threshold predictions
+    y_true_f = y_true.view(-1)
+    y_pred_f = y_pred.view(-1)
+    intersection = (y_true_f * y_pred_f).sum()
+    union = y_true_f.sum() + y_pred_f.sum() - intersection
+    iou = (intersection + 1e-6) / (union + 1e-6)
+    return iou.item()
 
 
-def dice_loss(pred, target, smooth=1e-6):
-    # Ensure the inputs are 4D: [batch_size, channels, height, width]
-    if pred.dim() == 3:
-        pred = pred.unsqueeze(1)  # Add channel dimension if missing
-    if target.dim() == 3:
-        target = target.unsqueeze(1)  # Add channel dimension if missing
-
-    # Compute Dice coefficient
-    intersection = (pred * target).sum(dim=(2, 3))
-    dice = (2. * intersection + smooth) / (pred.sum(dim=(2, 3)) + target.sum(dim=(2, 3)) + smooth)
-    return 1 - dice.mean()
-
-
-def combined_loss(pred, target, dice_weight=0.5, bce_weight=0.5):
-    # Ensure target has the same shape as pred by adding a channel dimension if needed
-    if target.dim() == 3:
-        target = target.unsqueeze(1)  # Make target shape [batch_size, 1, height, width]
-
-    dice = dice_loss(pred, target)
-    bce = nn.BCELoss()(pred, target)
-    return dice_weight * dice + bce_weight * bce
-
-def calculate_metrics(pred, target, smooth=1e-6):
-    # Ensure target has the same shape as pred by adding a channel dimension if needed
-    if target.dim() == 3:
-        target = target.unsqueeze(1)  # Make target shape [batch_size, 1, height, width]
-    
-    # Flatten the tensors along the spatial dimensions for element-wise comparison
-    pred_flat = pred.view(pred.size(0), -1)  # Shape: [batch_size, height * width]
-    target_flat = target.view(target.size(0), -1)  # Shape: [batch_size, height * width]
-
-    # Calculate Intersection
-    intersection = (pred_flat * target_flat).sum(dim=1)
-    
-    # Dice Score
-    dice = (2. * intersection + smooth) / (pred_flat.sum(dim=1) + target_flat.sum(dim=1) + smooth)
-    mean_dice = dice.mean().item()  # Get the average Dice score across the batch
-
-    # IoU Score
-    union = pred_flat.sum(dim=1) + target_flat.sum(dim=1) - intersection
-    iou = (intersection + smooth) / (union + smooth)
-    mean_iou = iou.mean().item()  # Get the average IoU score across the batch
-    
-    print(f"Dice={mean_dice:.4f}, IoU={mean_iou:.4f}")
-    return mean_dice, mean_iou
-
-# criterion = dice_loss
-criterion = combined_loss
-optimizer = optim.Adam(model.parameters(), lr=0.00001)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.5)
-
-num_epochs = 200
-for epoch in range(num_epochs):
+def train_model(model, loader, optimizer, criterion, device):
     model.train()
-    train_loss = 0.0
-
-    for images, masks in train_loader:
-        images = images.to(device)
-        masks = masks.to(device)
-
-        outputs = model(images)
-        loss = combined_loss(outputs, masks)  # Use combined BCE + Dice loss
+    epoch_loss = 0
+    for batch_idx, (data, target) in enumerate(loader):
+        data, target = data.to(device), target.to(device)
+        target = target.unsqueeze(1)  # Adjust target to [batch_size, 1, height, width]
 
         optimizer.zero_grad()
+        output = model(data)
+        loss = criterion(output, target)
         loss.backward()
         optimizer.step()
-        
-        train_loss += loss.item() * images.size(0)
-
-    # Adjust learning rate with the scheduler
-    scheduler.step(train_loss)
-    
-    calculate_metrics(outputs, masks)
-    print(f"Epoch {epoch+1}/{num_epochs}, Loss: {train_loss / len(train_loader.dataset):.4f}")
+        epoch_loss += loss.item()
+    return epoch_loss / len(loader)
 
 
-
-model.eval()
-dice_scores, iou_scores = [], []
-with torch.no_grad():
-    for images, masks in val_loader:
-        images = images.to(device)
-        masks = masks.to(device)
-        
-        outputs = model(images)
-        dice, iou = calculate_metrics(outputs, masks)
-        dice_scores.append(dice)
-        iou_scores.append(iou)
-
-print(f"Mean Dice: {np.mean(dice_scores):.4f}, Mean IoU: {np.mean(iou_scores):.4f}")
-
-
-import matplotlib.pyplot as plt
-
-def show_predictions(model, val_loader):
+# Testing Model
+def test_model(model, loader, device):
     model.eval()
+    dice_scores = []
+    iou_scores = []
     with torch.no_grad():
-        for images, masks in val_loader:
-            # Get model predictions
-            preds = model(images)
-            
-            # Select the first prediction and mask
-            pred = preds[0].squeeze().cpu().numpy()  # Shape should now be (256, 256)
-            mask = masks[0].squeeze().cpu().numpy()  # Shape should now be (256, 256)
-            
-            # Ensure values are in range [0, 1] for display
-            pred = (pred + 1) / 2.0  # If pred was in range [-1, 1], rescale to [0, 1]
-            mask = (mask + 1) / 2.0  # If mask was in range [-1, 1], rescale to [0, 1]
-
-            # Plot the results
-            fig, ax = plt.subplots(1, 2, figsize=(10, 5))
-            ax[0].imshow(pred, cmap='gray')
-            ax[0].set_title("Prediction")
-            ax[1].imshow(mask, cmap='gray')
-            ax[1].set_title("Ground Truth Mask")
-            plt.show()
-            
-            # Stop after showing the first batch for simplicity
-            break
+        for data, target in loader:
+            data, target = data.to(device), target.to(device)
+            output = model(data)
+            pred = torch.sigmoid(output) > 0.5
+            dice = dice_coefficient(target, pred)
+            iou = iou_score(target, pred)
+            dice_scores.append(dice)
+            iou_scores.append(iou)
+    # visualize_predictions(data, target, pred)
+    return np.mean(dice_scores), np.mean(iou_scores)
 
 
-show_predictions(model, val_loader)
-print()
+# Define the Dataset class with oversampling
+class RetinaDataset(Dataset):
+    def __init__(self, image_paths, mask_paths, transform=None, oversample_factor=3):
+        self.image_paths = image_paths
+        self.mask_paths = mask_paths
+        self.transform = transform
+        self.oversample_factor = oversample_factor  # Number of augmented versions per image
+
+    def __len__(self):
+        return len(self.image_paths) * self.oversample_factor
+
+    # def __getitem__(self, idx):
+    #     # Calculate the actual image index
+    #     img_idx = idx % len(self.image_paths)  # Get actual image index for oversampling
+        
+    #     # Load image and mask
+    #     image = cv2.imread(self.image_paths[img_idx], cv2.IMREAD_GRAYSCALE)
+    #     mask = cv2.imread(self.mask_paths[img_idx], cv2.IMREAD_GRAYSCALE)
+        
+    #     # Convert mask to binary if necessary
+    #     mask = (mask > 0).astype(np.float32)
+
+    #     # Apply transformations if specified
+    #     if self.transform:
+    #         augmented = self.transform(image=image, mask=mask)
+    #         image = augmented["image"]
+    #         mask = augmented["mask"]
+        
+    #     return image, mask
+    
+    def __getitem__(self, idx):
+        img_idx = idx % len(self.image_paths)
+        image = cv2.imread(self.image_paths[img_idx], cv2.IMREAD_GRAYSCALE).astype(np.float32)
+        mask = (cv2.imread(self.mask_paths[img_idx], cv2.IMREAD_GRAYSCALE) > 0).astype(np.float32)
+
+        if self.transform:
+            augmented = self.transform(image=image, mask=mask)
+            image = augmented["image"]
+            mask = augmented["mask"]
+        
+        return image, mask
+
+    
+class DiceLoss(nn.Module):
+    def __init__(self):
+        super(DiceLoss, self).__init__()
+
+    def forward(self, y_pred, y_true, smooth=1e-6):
+        y_pred = torch.sigmoid(y_pred)  # Apply sigmoid for probabilities
+        y_pred_f = y_pred.view(-1)
+        y_true_f = y_true.view(-1)
+        intersection = (y_pred_f * y_true_f).sum()
+        return 1 - (2. * intersection + smooth) / (y_pred_f.sum() + y_true_f.sum() + smooth)
+
+def combined_loss(y_pred, y_true, bce_weight=0.5):
+    bce = nn.BCEWithLogitsLoss()(y_pred, y_true)
+    dice = DiceLoss()(y_pred, y_true)
+    return bce_weight * bce + (1 - bce_weight) * dice
+
+
+
+
+
+import os
+import torch
+
+# Add a directory to save model checkpoints
+save_dir = "checkpoints"
+os.makedirs(save_dir, exist_ok=True)  # Create directory if it doesn't exist
+
+import os
+import torch
+
+# Add a directory to save model checkpoints
+save_dir = "checkpoints"
+os.makedirs(save_dir, exist_ok=True)  # Create directory if it doesn't exist
+
+def main(weight_decay=0.0, checkpoint_path=None, normalize=True):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Define transformations with noise, rotation, and other augmentations
+    if normalize:
+        transform = A.Compose([
+            A.Rotate(limit=45, p=0.5),
+            A.HorizontalFlip(p=0.5),
+            A.VerticalFlip(p=0.5),
+            A.GaussNoise(var_limit=(10.0, 50.0), p=0.5),
+            A.RandomBrightnessContrast(p=0.2),
+            A.Normalize(mean=0.5, std=0.5),
+            ToTensorV2()
+        ])
+    else:
+        transform = A.Compose([
+            A.Rotate(limit=45, p=0.5),
+            A.HorizontalFlip(p=0.5),
+            A.VerticalFlip(p=0.5),
+            A.GaussNoise(var_limit=(10.0, 50.0), p=0.5),
+            A.RandomBrightnessContrast(p=0.2),
+            ToTensorV2()
+        ])
+
+    train_images_path = '/Users/danielvennemeyer/Workspace/Deep Learning/Retinal-Segmentation/Data/train/image'
+    train_images = [os.path.join(train_images_path, f) for f in os.listdir(train_images_path)]
+    train_mask_path = '/Users/danielvennemeyer/Workspace/Deep Learning/Retinal-Segmentation/Data/train/mask'
+    train_masks = [os.path.join(train_mask_path, f) for f in os.listdir(train_mask_path)]
+
+    dataset = RetinaDataset(train_images, train_masks, transform=transform)
+    train_loader = DataLoader(dataset, batch_size=8, shuffle=True)
+    val_loader = DataLoader(dataset, batch_size=8, shuffle=False)
+
+    model = UNet(in_channels=1, out_channels=1).to(device)
+    
+    # Include weight decay as a regularization parameter
+    optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=weight_decay)
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, verbose=True)
+    criterion = combined_loss
+
+    # Load checkpoint if provided
+    start_epoch = 0
+    if checkpoint_path and os.path.isfile(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        start_epoch = checkpoint["epoch"] + 1  # Start from the next epoch
+        print(f"Loaded checkpoint from '{checkpoint_path}', starting from epoch {start_epoch}")
+
+    for epoch in range(start_epoch, 50):  # Adjust epochs as needed
+        train_loss = train_model(model, train_loader, optimizer, criterion, device)
+        dice, iou = test_model(model, val_loader, device)
+        scheduler.step(train_loss)
+        
+        print(f"Epoch {epoch+1}: Train Loss={train_loss:.4f}, Dice={dice:.4f}, IoU={iou:.4f}")
+        
+        # Save the model every 2 epochs
+        if (epoch + 1) % 2 == 0:
+            model_save_path = os.path.join(save_dir, f"unregularized_unet_epoch_{epoch+1}.pth")
+            torch.save({
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict()
+            }, model_save_path)
+            print(f"Model saved at {model_save_path}")
+
+if __name__ == "__main__":
+    # Example: Set weight decay and checkpoint path if resuming training
+    # main(weight_decay=0.01, checkpoint_path="checkpoints/unet_epoch_20.pth")
+    main(weight_decay=0.0001)
