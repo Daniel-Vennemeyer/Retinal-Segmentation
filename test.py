@@ -2,18 +2,16 @@ import torch, os
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
-import torchvision.transforms as transforms
-from PIL import Image
 import numpy as np
-from sklearn.metrics import jaccard_score
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from torch.utils.data import Dataset, DataLoader
 import cv2
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 # Define U-Net model
 class UNet(nn.Module):
-    def __init__(self, in_channels=1, out_channels=1, features=[64, 128, 256, 512]):
+    def __init__(self, in_channels=1, out_channels=1, features=[64, 128, 256]):
         super(UNet, self).__init__()
         self.encoder = nn.ModuleList()
         self.decoder = nn.ModuleList()
@@ -80,23 +78,6 @@ def iou_score(y_true, y_pred, threshold=0.5):
     return iou.item()
 
 
-
-# Training Loop
-# def train_model(model, loader, optimizer, criterion, device):
-#     model.train()
-#     epoch_loss = 0
-#     for batch_idx, (data, target) in enumerate(loader):
-#         data, target = data.to(device), target.to(device)
-#         target = (target > 0).float()  # Convert any non-zero values to 1
-#         optimizer.zero_grad()
-#         output = model(data)
-#         loss = criterion(output, target)
-#         loss.backward()
-#         optimizer.step()
-#         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-#         epoch_loss += loss.item()
-#     return epoch_loss / len(loader)
-
 def train_model(model, loader, optimizer, criterion, device):
     model.train()
     epoch_loss = 0
@@ -130,28 +111,10 @@ def test_model(model, loader, device):
     # visualize_predictions(data, target, pred)
     return np.mean(dice_scores), np.mean(iou_scores)
 
-# Dataset Class
-# class RetinaDataset(Dataset):
-#     def __init__(self, image_paths, mask_paths, transform=None):
-#         self.image_paths = image_paths
-#         self.mask_paths = mask_paths
-#         self.transform = transform
-
-#     def __len__(self):
-#         return len(self.image_paths)
-
-#     def __getitem__(self, idx):
-#         image = Image.open(self.image_paths[idx]).convert("L")
-#         mask = Image.open(self.mask_paths[idx]).convert("L")
-#         if self.transform:
-#             image = self.transform(image)
-#             mask = self.transform(mask)
-#         return image, mask
-
 
 # Define the Dataset class with oversampling
 class RetinaDataset(Dataset):
-    def __init__(self, image_paths, mask_paths, transform=None, oversample_factor=2):
+    def __init__(self, image_paths, mask_paths, transform=None, oversample_factor=3):
         self.image_paths = image_paths
         self.mask_paths = mask_paths
         self.transform = transform
@@ -160,18 +123,30 @@ class RetinaDataset(Dataset):
     def __len__(self):
         return len(self.image_paths) * self.oversample_factor
 
-    def __getitem__(self, idx):
-        # Calculate the actual image index
-        img_idx = idx % len(self.image_paths)  # Get actual image index for oversampling
+    # def __getitem__(self, idx):
+    #     # Calculate the actual image index
+    #     img_idx = idx % len(self.image_paths)  # Get actual image index for oversampling
         
-        # Load image and mask
-        image = cv2.imread(self.image_paths[img_idx], cv2.IMREAD_GRAYSCALE)
-        mask = cv2.imread(self.mask_paths[img_idx], cv2.IMREAD_GRAYSCALE)
+    #     # Load image and mask
+    #     image = cv2.imread(self.image_paths[img_idx], cv2.IMREAD_GRAYSCALE)
+    #     mask = cv2.imread(self.mask_paths[img_idx], cv2.IMREAD_GRAYSCALE)
         
-        # Convert mask to binary if necessary
-        mask = (mask > 0).astype(np.float32)
+    #     # Convert mask to binary if necessary
+    #     mask = (mask > 0).astype(np.float32)
 
-        # Apply transformations if specified
+    #     # Apply transformations if specified
+    #     if self.transform:
+    #         augmented = self.transform(image=image, mask=mask)
+    #         image = augmented["image"]
+    #         mask = augmented["mask"]
+        
+    #     return image, mask
+    
+    def __getitem__(self, idx):
+        img_idx = idx % len(self.image_paths)
+        image = cv2.imread(self.image_paths[img_idx], cv2.IMREAD_GRAYSCALE).astype(np.float32)
+        mask = (cv2.imread(self.mask_paths[img_idx], cv2.IMREAD_GRAYSCALE) > 0).astype(np.float32)
+
         if self.transform:
             augmented = self.transform(image=image, mask=mask)
             image = augmented["image"]
@@ -210,58 +185,79 @@ def visualize_predictions(data, target, pred):
 
 
 
-# Loading Dataset and Training Model
-def main():
+import os
+import torch
+
+# Add a directory to save model checkpoints
+save_dir = "checkpoints"
+os.makedirs(save_dir, exist_ok=True)  # Create directory if it doesn't exist
+
+import os
+import torch
+
+# Add a directory to save model checkpoints
+save_dir = "checkpoints"
+os.makedirs(save_dir, exist_ok=True)  # Create directory if it doesn't exist
+
+def main(weight_decay=0.0, checkpoint_path=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    transform = transforms.Compose([
-        transforms.Resize((256, 256)),
-        transforms.ToTensor(),
-    ])
-
-    # import albumentations as A
-    # from albumentations.pytorch import ToTensorV2
-
-   # Define transformations with noise, rotation, and other augmentations
+    
+    # Define transformations with noise, rotation, and other augmentations
     transform = A.Compose([
         A.Rotate(limit=45, p=0.5),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.GaussNoise(var_limit=(10.0, 50.0), p=0.5),
         A.RandomBrightnessContrast(p=0.2),
-        A.Normalize(mean=0.5, std=0.5),
+        # A.Normalize(mean=0.5, std=0.5),
         ToTensorV2()
     ])
 
-    train_images_path = '/Users/danielvennemeyer/Workspace/Deep Learning/Retinal-Segmentation/Data/test/image'
+    train_images_path = '/Users/danielvennemeyer/Workspace/Deep Learning/Retinal-Segmentation/Data/train/image'
     train_images = [os.path.join(train_images_path, f) for f in os.listdir(train_images_path)]
-    train_mask_path = '/Users/danielvennemeyer/Workspace/Deep Learning/Retinal-Segmentation/Data/test/mask'
+    train_mask_path = '/Users/danielvennemeyer/Workspace/Deep Learning/Retinal-Segmentation/Data/train/mask'
     train_masks = [os.path.join(train_mask_path, f) for f in os.listdir(train_mask_path)]
 
     dataset = RetinaDataset(train_images, train_masks, transform=transform)
     train_loader = DataLoader(dataset, batch_size=8, shuffle=True)
     val_loader = DataLoader(dataset, batch_size=8, shuffle=False)
 
-    # Example usage
-    # train_image_paths = ["path/to/image1.png", "path/to/image2.png"]  # Replace with actual paths
-    # train_mask_paths = ["path/to/mask1.png", "path/to/mask2.png"]
-
-    # # Instantiate dataset and dataloader
-    # train_dataset = RetinaDataset(train_image_paths, train_mask_paths, transform=transform, oversample_factor=5)
-    # train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
-
     model = UNet(in_channels=1, out_channels=1).to(device)
-    # optimizer = optim.Adam(model.parameters(), lr=0.001)
-    from torch.optim.lr_scheduler import ReduceLROnPlateau
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    
+    # Include weight decay as a regularization parameter
+    optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=weight_decay)
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, verbose=True)
-
     criterion = combined_loss
 
-    for epoch in range(400):  # Adjust epochs as needed
+    # Load checkpoint if provided
+    start_epoch = 0
+    if checkpoint_path and os.path.isfile(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        start_epoch = checkpoint["epoch"] + 1  # Start from the next epoch
+        print(f"Loaded checkpoint from '{checkpoint_path}', starting from epoch {start_epoch}")
+
+    for epoch in range(start_epoch, 400):  # Adjust epochs as needed
         train_loss = train_model(model, train_loader, optimizer, criterion, device)
         dice, iou = test_model(model, val_loader, device)
         scheduler.step(train_loss)
+        
         print(f"Epoch {epoch+1}: Train Loss={train_loss:.4f}, Dice={dice:.4f}, IoU={iou:.4f}")
+        
+        # Save the model every 2 epochs
+        if (epoch + 1) % 2 == 0:
+            model_save_path = os.path.join(save_dir, f"unregularized_unet_epoch_{epoch+1}.pth")
+            torch.save({
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict()
+            }, model_save_path)
+            print(f"Model saved at {model_save_path}")
 
 if __name__ == "__main__":
-    main()
+    # Example: Set weight decay and checkpoint path if resuming training
+    # main(weight_decay=0.01, checkpoint_path="checkpoints/unet_epoch_20.pth")
+    main(weight_decay=0.0001)
