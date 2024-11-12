@@ -6,16 +6,22 @@ import cv2
 from model import UNet, RetinaDataset, dice_coefficient, iou_score
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
+from datetime import datetime
 
 import matplotlib.pyplot as plt
 
 def visualize_predictions(data, target, pred):
-    fig, ax = plt.subplots(1, 3, figsize=(12, 4))
+    # Ensure that data, target, and pred are 2D by selecting the first sample in the batch
+    data = data[0, 0].cpu() if data.dim() == 4 else data.cpu()  # [batch, channel, height, width] -> [height, width]
+    target = target[0].cpu() if target.dim() == 3 else target[0, 0].cpu()  # Handle potential extra dimensions
+    pred = pred[0, 0].cpu() if pred.dim() == 4 else pred.cpu()  # Ensure pred is also 2D
     
-    # Select the first image in the batch for visualization
-    data = data[0, 0].cpu() if data.dim() == 4 else data.cpu()
-    target = target[0, 0].cpu() if target.dim() == 4 else target.cpu()
-    pred = pred[0, 0].cpu() if pred.dim() == 4 else pred.cpu()
+    # Print shapes for debugging
+    print(f"Data shape for imshow: {data.shape}")
+    print(f"Target shape for imshow: {target.shape}")
+    print(f"Prediction shape for imshow: {pred.shape}")
+
+    fig, ax = plt.subplots(1, 3, figsize=(12, 4))
     
     ax[0].imshow(data, cmap='gray')
     ax[0].set_title('Input Image')
@@ -55,7 +61,7 @@ def test_model(model, loader, device):
             iou = iou_score(target, pred)
             dice_scores.append(dice)
             iou_scores.append(iou)
-        # visualize_predictions(data, target, pred)
+        visualize_predictions(data, target, pred)
     mean_dice = np.mean(dice_scores)
     mean_iou = np.mean(iou_scores)
     return mean_dice, mean_iou
@@ -65,11 +71,6 @@ def main(checkpoint_path, test_images_path, test_masks_path, batch_size=8):
 
     # Define any required transformations (without normalization if you prefer not to)
     transform = A.Compose([
-        A.Rotate(limit=45, p=0.5),
-        A.HorizontalFlip(p=0.5),
-        A.VerticalFlip(p=0.5),
-        A.GaussNoise(var_limit=(10.0, 50.0), p=0.5),
-        A.RandomBrightnessContrast(p=0.2),
         A.Normalize(mean=0.5, std=0.5),
         ToTensorV2()
     ])
@@ -85,7 +86,8 @@ def main(checkpoint_path, test_images_path, test_masks_path, batch_size=8):
     print(f"Test Dice Coefficient: {mean_dice:.4f}, Test IoU Score: {mean_iou:.4f}")
 
 if __name__ == "__main__":
-    checkpoint_path = "checkpoints/regularized_unet_epoch_20.pth"  # Update with your actual model checkpoint path
-    test_images_path = "/Users/danielvennemeyer/Workspace/Deep Learning/Retinal-Segmentation/Data/test/image"
-    test_masks_path = "/Users/danielvennemeyer/Workspace/Deep Learning/Retinal-Segmentation/Data/test/mask"
+    checkpoint_path = "unet_epoch_54.pth"
+    test_images_path = "Data/test/image"
+    test_masks_path = "Data/test/mask"
     main(checkpoint_path, test_images_path, test_masks_path)
+    print(datetime.now().strftime("%d/%m/%Y %H:%M:%S"))

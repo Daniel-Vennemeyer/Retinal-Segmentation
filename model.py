@@ -122,25 +122,6 @@ class RetinaDataset(Dataset):
 
     def __len__(self):
         return len(self.image_paths) * self.oversample_factor
-
-    # def __getitem__(self, idx):
-    #     # Calculate the actual image index
-    #     img_idx = idx % len(self.image_paths)  # Get actual image index for oversampling
-        
-    #     # Load image and mask
-    #     image = cv2.imread(self.image_paths[img_idx], cv2.IMREAD_GRAYSCALE)
-    #     mask = cv2.imread(self.mask_paths[img_idx], cv2.IMREAD_GRAYSCALE)
-        
-    #     # Convert mask to binary if necessary
-    #     mask = (mask > 0).astype(np.float32)
-
-    #     # Apply transformations if specified
-    #     if self.transform:
-    #         augmented = self.transform(image=image, mask=mask)
-    #         image = augmented["image"]
-    #         mask = augmented["mask"]
-        
-    #     return image, mask
     
     def __getitem__(self, idx):
         img_idx = idx % len(self.image_paths)
@@ -171,25 +152,11 @@ def combined_loss(y_pred, y_true, bce_weight=0.5):
     dice = DiceLoss()(y_pred, y_true)
     return bce_weight * bce + (1 - bce_weight) * dice
 
-
-
-
-
-import os
-import torch
-
 # Add a directory to save model checkpoints
 save_dir = "checkpoints"
 os.makedirs(save_dir, exist_ok=True)  # Create directory if it doesn't exist
 
-import os
-import torch
-
-# Add a directory to save model checkpoints
-save_dir = "checkpoints"
-os.makedirs(save_dir, exist_ok=True)  # Create directory if it doesn't exist
-
-def main(weight_decay=0.0, checkpoint_path=None, normalize=True):
+def main(weight_decay=.0001, checkpoint_path=None, normalize=True):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # Define transformations with noise, rotation, and other augmentations
@@ -213,9 +180,9 @@ def main(weight_decay=0.0, checkpoint_path=None, normalize=True):
             ToTensorV2()
         ])
 
-    train_images_path = '/Users/danielvennemeyer/Workspace/Deep Learning/Retinal-Segmentation/Data/train/image'
+    train_images_path = 'Data/train/image'
     train_images = [os.path.join(train_images_path, f) for f in os.listdir(train_images_path)]
-    train_mask_path = '/Users/danielvennemeyer/Workspace/Deep Learning/Retinal-Segmentation/Data/train/mask'
+    train_mask_path = 'Data/train/mask'
     train_masks = [os.path.join(train_mask_path, f) for f in os.listdir(train_mask_path)]
 
     dataset = RetinaDataset(train_images, train_masks, transform=transform)
@@ -239,16 +206,16 @@ def main(weight_decay=0.0, checkpoint_path=None, normalize=True):
         start_epoch = checkpoint["epoch"] + 1  # Start from the next epoch
         print(f"Loaded checkpoint from '{checkpoint_path}', starting from epoch {start_epoch}")
 
-    for epoch in range(start_epoch, 50):  # Adjust epochs as needed
+    for epoch in range(start_epoch, 60):  # Adjust epochs as needed
         train_loss = train_model(model, train_loader, optimizer, criterion, device)
         dice, iou = test_model(model, val_loader, device)
         scheduler.step(train_loss)
         
         print(f"Epoch {epoch+1}: Train Loss={train_loss:.4f}, Dice={dice:.4f}, IoU={iou:.4f}")
         
-        # Save the model every 2 epochs
+        # Save the model every other epoch
         if (epoch + 1) % 2 == 0:
-            model_save_path = os.path.join(save_dir, f"unregularized_unet_epoch_{epoch+1}.pth")
+            model_save_path = os.path.join(save_dir, f"unet_epoch_{epoch+1}.pth")
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
@@ -258,6 +225,8 @@ def main(weight_decay=0.0, checkpoint_path=None, normalize=True):
             print(f"Model saved at {model_save_path}")
 
 if __name__ == "__main__":
-    # Example: Set weight decay and checkpoint path if resuming training
-    # main(weight_decay=0.01, checkpoint_path="checkpoints/unet_epoch_20.pth")
-    main(weight_decay=0.0001)
+    # Example: Set weight decay and normalization
+    # main(weight_decay=0.01, normalize=True, checkpoint_path='checkpoints/regularized_unet_epoch_20.pth')
+
+    # Otherwise, use default paramters
+    main()
